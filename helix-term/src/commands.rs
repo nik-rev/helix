@@ -2527,6 +2527,7 @@ fn global_search(cx: &mut Context) {
     cx.editor.registers.last_search_register = reg;
 
     let picker = Picker::new(
+        Some("Global Search"),
         columns,
         1, // contents
         [],
@@ -3037,9 +3038,16 @@ fn buffer_picker(cx: &mut Context) {
                 .into()
         }),
     ];
-    let picker = Picker::new(columns, 2, items, (), |cx, meta, action| {
-        cx.editor.switch(meta.id, action);
-    })
+    let picker = Picker::new(
+        Some("Buffers"),
+        columns,
+        2,
+        items,
+        (),
+        |cx, meta, action| {
+            cx.editor.switch(meta.id, action);
+        },
+    )
     .with_preview(|editor, meta| {
         let doc = &editor.documents.get(&meta.id)?;
         let &view_id = doc.selections().keys().next()?;
@@ -3116,6 +3124,7 @@ fn jumplist_picker(cx: &mut Context) {
     ];
 
     let picker = Picker::new(
+        Some("Jump List"),
         columns,
         1, // path
         cx.editor.tree.views().flat_map(|(view, _)| {
@@ -3198,6 +3207,7 @@ fn changed_file_picker(cx: &mut Context) {
     ];
 
     let picker = Picker::new(
+        Some("Changed Files"),
         columns,
         1, // path
         [],
@@ -3288,32 +3298,39 @@ pub fn command_palette(cx: &mut Context) {
                 ui::PickerColumn::new("doc", |item: &MappableCommand, _| item.doc().into()),
             ];
 
-            let picker = Picker::new(columns, 0, commands, keymap, move |cx, command, _action| {
-                let mut ctx = Context {
-                    register,
-                    count,
-                    editor: cx.editor,
-                    callback: Vec::new(),
-                    on_next_key_callback: None,
-                    jobs: cx.jobs,
-                };
-                let focus = view!(ctx.editor).id;
+            let picker = Picker::new(
+                Some("Commands"),
+                columns,
+                0,
+                commands,
+                keymap,
+                move |cx, command, _action| {
+                    let mut ctx = Context {
+                        register,
+                        count,
+                        editor: cx.editor,
+                        callback: Vec::new(),
+                        on_next_key_callback: None,
+                        jobs: cx.jobs,
+                    };
+                    let focus = view!(ctx.editor).id;
 
-                command.execute(&mut ctx);
+                    command.execute(&mut ctx);
 
-                if ctx.editor.tree.contains(focus) {
-                    let config = ctx.editor.config();
-                    let mode = ctx.editor.mode();
-                    let view = view_mut!(ctx.editor, focus);
-                    let doc = doc_mut!(ctx.editor, &view.doc);
+                    if ctx.editor.tree.contains(focus) {
+                        let config = ctx.editor.config();
+                        let mode = ctx.editor.mode();
+                        let view = view_mut!(ctx.editor, focus);
+                        let doc = doc_mut!(ctx.editor, &view.doc);
 
-                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                        view.ensure_cursor_in_view(doc, config.scrolloff);
 
-                    if mode != Mode::Insert {
-                        doc.append_changes_to_history(view);
+                        if mode != Mode::Insert {
+                            doc.append_changes_to_history(view);
+                        }
                     }
-                }
-            });
+                },
+            );
             compositor.push(Box::new(overlaid(picker)));
         },
     ));
