@@ -1342,7 +1342,7 @@ fn lsp_workspace_command(
                         },
                     )];
                     let picker = ui::Picker::new(
-                        Some("Workspace Symbols"),
+                        Some("LSP Commands"),
                         columns,
                         0,
                         commands,
