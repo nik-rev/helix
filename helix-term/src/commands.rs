@@ -30,9 +30,7 @@ use helix_core::{
     object, pos_at_coords,
     regex::{self, Regex},
     search::{self, CharMatcher},
-    selection,
-    shellwords::{self, Args},
-    surround,
+    selection, shellwords, surround,
     syntax::{BlockCommentToken, LanguageServerFeature},
     text_annotations::{Overlay, TextAnnotations},
     textobject,
@@ -209,7 +207,7 @@ use helix_view::{align_view, Align};
 pub enum MappableCommand {
     Typable {
         name: String,
-        args: String,
+        args: Vec<String>,
         doc: String,
     },
     Static {
@@ -244,17 +242,15 @@ impl MappableCommand {
     pub fn execute(&self, cx: &mut Context) {
         match &self {
             Self::Typable { name, args, doc: _ } => {
+                let args: Vec<Cow<str>> = args.iter().map(Cow::from).collect();
                 if let Some(command) = typed::TYPABLE_COMMAND_MAP.get(name.as_str()) {
                     let mut cx = compositor::Context {
                         editor: cx.editor,
                         jobs: cx.jobs,
                         scroll: None,
                     };
-
-                    if let Err(err) =
-                        (command.fun)(&mut cx, Args::from(args), PromptEvent::Validate)
-                    {
-                        cx.editor.set_error(format!("{err}"));
+                    if let Err(e) = (command.fun)(&mut cx, &args[..], PromptEvent::Validate) {
+                        cx.editor.set_error(format!("{}", e));
                     }
                 }
             }
@@ -625,15 +621,21 @@ impl std::str::FromStr for MappableCommand {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(suffix) = s.strip_prefix(':') {
-            let (name, args) = suffix.split_once(' ').unwrap_or((suffix, ""));
+            let mut typable_command = suffix.split(' ').map(|arg| arg.trim());
+            let name = typable_command
+                .next()
+                .ok_or_else(|| anyhow!("Expected typable command name"))?;
+            let args = typable_command
+                .map(|s| s.to_owned())
+                .collect::<Vec<String>>();
             typed::TYPABLE_COMMAND_MAP
                 .get(name)
                 .map(|cmd| MappableCommand::Typable {
                     name: cmd.name.to_owned(),
                     doc: format!(":{} {:?}", cmd.name, args),
-                    args: args.to_string(),
+                    args,
                 })
-                .ok_or_else(|| anyhow!("No TypableCommand named '{}'", name))
+                .ok_or_else(|| anyhow!("No TypableCommand named '{}'", s))
         } else if let Some(suffix) = s.strip_prefix('@') {
             helix_view::input::parse_macro(suffix).map(|keys| Self::Macro {
                 name: s.to_string(),
@@ -3043,12 +3045,11 @@ fn buffer_picker(cx: &mut Context) {
     })
     .with_preview(|editor, meta| {
         let doc = &editor.documents.get(&meta.id)?;
-        let &view_id = doc.selections().keys().next()?;
-        let line = doc
-            .selection(view_id)
-            .primary()
-            .cursor_line(doc.text().slice(..));
-        Some((meta.id.into(), Some((line, line))))
+        let lines = doc.selections().values().next().map(|selection| {
+            let cursor_line = selection.primary().cursor_line(doc.text().slice(..));
+            (cursor_line, cursor_line)
+        });
+        Some((meta.id.into(), lines))
     })
     .with_title("Buffers");
     cx.push_layer(Box::new(overlaid(picker)));
@@ -3256,7 +3257,7 @@ pub fn command_palette(cx: &mut Context) {
                     .iter()
                     .map(|cmd| MappableCommand::Typable {
                         name: cmd.name.to_owned(),
-                        args: String::new(),
+                        args: Vec::new(),
                         doc: cmd.doc.to_owned(),
                     }),
             );
@@ -3478,6 +3479,7 @@ fn open(cx: &mut Context, open: Open) {
     let text = doc.text().slice(..);
     let contents = doc.text();
     let selection = doc.selection(view.id);
+    let mut offs = 0;
 
     let mut ranges = SmallVec::with_capacity(selection.len());
 
@@ -3554,7 +3556,7 @@ fn open(cx: &mut Context, open: Open) {
         let text = text.repeat(count);
 
         // calculate new selection ranges
-        let pos = above_next_line_end_index + above_next_line_end_width;
+        let pos = offs + above_next_line_end_index + above_next_line_end_width;
         let comment_len = continue_comment_token
             .map(|token| token.len() + 1) // `+ 1` for the extra space added
             .unwrap_or_default();
@@ -3566,6 +3568,9 @@ fn open(cx: &mut Context, open: Open) {
                 pos + (i * (1 + indent_len + comment_len)) + indent_len + comment_len,
             ));
         }
+
+        // update the offset for the next range
+        offs += text.chars().count();
 
         (
             above_next_line_end_index,
@@ -3980,8 +3985,10 @@ pub mod insert {
     }
 
     pub fn insert_newline(cx: &mut Context) {
+        let config = cx.editor.config();
         let (view, doc) = current_ref!(cx.editor);
         let text = doc.text().slice(..);
+        let line_ending = doc.line_ending.as_str();
 
         let contents = doc.text();
         let selection = doc.selection(view.id).clone();
@@ -3989,8 +3996,18 @@ pub mod insert {
 
         // TODO: this is annoying, but we need to do it to properly calculate pos after edits
         let mut global_offs = 0;
+        let mut new_text = String::new();
+
+        let continue_comment_tokens = if config.continue_comments {
+            doc.language_config()
+                .and_then(|config| config.comment_tokens.as_ref())
+        } else {
+            None
+        };
 
         let mut transaction = Transaction::change_by_selection(contents, &selection, |range| {
+            // Tracks the number of trailing whitespace characters deleted by this selection.
+            let mut chars_deleted = 0;
             let pos = range.cursor(text);
 
             let prev = if pos == 0 {
@@ -4003,15 +4020,8 @@ pub mod insert {
             let current_line = text.char_to_line(pos);
             let line_start = text.line_to_char(current_line);
 
-            let mut new_text = String::new();
-
-            let continue_comment_token = if doc.config.load().continue_comments {
-                doc.language_config()
-                    .and_then(|config| config.comment_tokens.as_ref())
-                    .and_then(|tokens| comment::get_comment_token(text, tokens, current_line))
-            } else {
-                None
-            };
+            let continue_comment_token = continue_comment_tokens
+                .and_then(|tokens| comment::get_comment_token(text, tokens, current_line));
 
             let (from, to, local_offs) = if let Some(idx) =
                 text.slice(line_start..pos).last_non_whitespace_char()
@@ -4024,7 +4034,7 @@ pub mod insert {
                     _ => indent::indent_for_newline(
                         doc.language_config(),
                         doc.syntax(),
-                        &doc.config.load().indent_heuristic,
+                        &config.indent_heuristic,
                         &doc.indent_style,
                         doc.tab_width(),
                         text,
@@ -4043,7 +4053,8 @@ pub mod insert {
                     .map_or(false, |pair| pair.open == prev && pair.close == curr);
 
                 let local_offs = if let Some(token) = continue_comment_token {
-                    new_text.push_str(doc.line_ending.as_str());
+                    new_text.reserve_exact(line_ending.len() + indent.len() + token.len() + 1);
+                    new_text.push_str(line_ending);
                     new_text.push_str(&indent);
                     new_text.push_str(token);
                     new_text.push(' ');
@@ -4051,37 +4062,39 @@ pub mod insert {
                 } else if on_auto_pair {
                     // line where the cursor will be
                     let inner_indent = indent.clone() + doc.indent_style.as_str();
-                    new_text.reserve_exact(2 + indent.len() + inner_indent.len());
-                    new_text.push_str(doc.line_ending.as_str());
+                    new_text
+                        .reserve_exact(line_ending.len() * 2 + indent.len() + inner_indent.len());
+                    new_text.push_str(line_ending);
                     new_text.push_str(&inner_indent);
 
                     // line where the matching pair will be
                     let local_offs = new_text.chars().count();
-                    new_text.push_str(doc.line_ending.as_str());
+                    new_text.push_str(line_ending);
                     new_text.push_str(&indent);
 
                     local_offs
                 } else {
-                    new_text.reserve_exact(1 + indent.len());
-                    new_text.push_str(doc.line_ending.as_str());
+                    new_text.reserve_exact(line_ending.len() + indent.len());
+                    new_text.push_str(line_ending);
                     new_text.push_str(&indent);
 
                     new_text.chars().count()
                 };
 
+                // Note that `first_trailing_whitespace_char` is at least `pos` so this unsigned
+                // subtraction cannot underflow.
+                chars_deleted = pos - first_trailing_whitespace_char;
+
                 (
                     first_trailing_whitespace_char,
                     pos,
-                    // Note that `first_trailing_whitespace_char` is at least `pos` so the
-                    // unsigned subtraction (`pos - first_trailing_whitespace_char`) cannot
-                    // underflow.
-                    local_offs as isize - (pos - first_trailing_whitespace_char) as isize,
+                    local_offs as isize - chars_deleted as isize,
                 )
             } else {
                 // If the current line is all whitespace, insert a line ending at the beginning of
                 // the current line. This makes the current line empty and the new line contain the
                 // indentation of the old line.
-                new_text.push_str(doc.line_ending.as_str());
+                new_text.push_str(line_ending);
 
                 (line_start, line_start, new_text.chars().count() as isize)
             };
@@ -4089,14 +4102,14 @@ pub mod insert {
             let new_range = if range.cursor(text) > range.anchor {
                 // when appending, extend the range by local_offs
                 Range::new(
-                    range.anchor + global_offs,
-                    (range.head as isize + local_offs) as usize + global_offs,
+                    (range.anchor as isize + global_offs) as usize,
+                    (range.head as isize + local_offs + global_offs) as usize,
                 )
             } else {
                 // when inserting, slide the range by local_offs
                 Range::new(
-                    (range.anchor as isize + local_offs) as usize + global_offs,
-                    (range.head as isize + local_offs) as usize + global_offs,
+                    (range.anchor as isize + local_offs + global_offs) as usize,
+                    (range.head as isize + local_offs + global_offs) as usize,
                 )
             };
 
@@ -4104,9 +4117,11 @@ pub mod insert {
             // range.replace(|range| range.is_empty(), head); -> fn extend if cond true, new head pos
             // can be used with cx.mode to do replace or extend on most changes
             ranges.push(new_range);
-            global_offs += new_text.chars().count();
+            global_offs += new_text.chars().count() as isize - chars_deleted as isize;
+            let tendril = Tendril::from(&new_text);
+            new_text.clear();
 
-            (from, to, Some(new_text.into()))
+            (from, to, Some(tendril))
         });
 
         transaction = transaction.with_selection(Selection::new(ranges, selection.primary_index()));
@@ -4331,19 +4346,13 @@ fn yank_joined_impl(editor: &mut Editor, separator: &str, register: char) {
     let (view, doc) = current!(editor);
     let text = doc.text().slice(..);
 
-    let separator = if separator.is_empty() {
-        doc.line_ending.as_str()
-    } else {
-        separator
-    };
-
     let selection = doc.selection(view.id);
     let selections = selection.len();
     let joined = selection
         .fragments(text)
         .fold(String::new(), |mut acc, fragment| {
             if !acc.is_empty() {
-                acc.push_str(&shellwords::unescape(separator));
+                acc.push_str(separator);
             }
             acc.push_str(&fragment);
             acc
@@ -4790,7 +4799,7 @@ fn join_selections_impl(cx: &mut Context, select_space: bool) {
         changes.reserve(lines.len());
 
         let first_line_idx = slice.line_to_char(start);
-        let first_line_idx = skip_while(slice, first_line_idx, |ch| matches!(ch, ' ' | 't'))
+        let first_line_idx = skip_while(slice, first_line_idx, |ch| matches!(ch, ' ' | '\t'))
             .unwrap_or(first_line_idx);
         let first_line = slice.slice(first_line_idx..);
         let mut current_comment_token = comment_tokens
