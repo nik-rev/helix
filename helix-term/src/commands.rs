@@ -69,7 +69,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::Read,
+    io::{self, Read},
     num::NonZeroUsize,
 };
 
@@ -83,7 +83,7 @@ use serde::de::{self, Deserialize, Deserializer};
 use url::Url;
 
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{sinks, BinaryDetection, SearcherBuilder};
+use grep_searcher::{BinaryDetection, SearcherBuilder, SinkError as _};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
 pub type OnKeyCallback = Box<dyn FnOnce(&mut Context, KeyEvent)>;
@@ -2390,13 +2390,15 @@ fn global_search(cx: &mut Context) {
         path: PathBuf,
         /// 0 indexed lines
         line_num: usize,
+        char_range: std::ops::Range<usize>,
     }
 
     impl FileResult {
-        fn new(path: &Path, line_num: usize) -> Self {
+        fn new(path: &Path, line_num: usize, char_range: std::ops::Range<usize>) -> Self {
             Self {
                 path: path.to_path_buf(),
                 line_num,
+                char_range,
             }
         }
     }
@@ -2496,10 +2498,45 @@ fn global_search(cx: &mut Context) {
                             _ => return WalkState::Continue,
                         };
 
+                        #[derive(Clone, Debug)]
+                        pub struct UTF8Range<F>(pub F)
+                        where
+                            F: FnMut(u64, std::ops::Range<usize>, &str) -> Result<bool, io::Error>;
+
+                        impl<F> grep_searcher::Sink for UTF8Range<F>
+                        where
+                            F: FnMut(u64, std::ops::Range<usize>, &str) -> Result<bool, io::Error>,
+                        {
+                            type Error = io::Error;
+
+                            fn matched(
+                                &mut self,
+                                _searcher: &grep_searcher::Searcher,
+                                mat: &grep_searcher::SinkMatch<'_>,
+                            ) -> Result<bool, io::Error> {
+                                let matched = match std::str::from_utf8(mat.bytes()) {
+                                    Ok(matched) => matched,
+                                    Err(err) => return Err(io::Error::error_message(err)),
+                                };
+                                let line_number = match mat.line_number() {
+                                    Some(line_number) => line_number,
+                                    None => {
+                                        let msg = "line numbers not enabled";
+                                        return Err(io::Error::error_message(msg));
+                                    }
+                                };
+                                (self.0)(line_number, mat.bytes_range_in_buffer(), matched)
+                            }
+                        }
+
                         let mut stop = false;
-                        let sink = sinks::UTF8(|line_num, _line_content| {
+                        let sink = UTF8Range(|line_num, char_range, _line_content| {
                             stop = injector
-                                .push(FileResult::new(entry.path(), line_num as usize - 1))
+                                .push(FileResult::new(
+                                    entry.path(),
+                                    line_num as usize - 1,
+                                    char_range,
+                                ))
                                 .is_err();
 
                             Ok(!stop)
@@ -2553,7 +2590,14 @@ fn global_search(cx: &mut Context) {
         1, // contents
         [],
         config,
-        move |cx, FileResult { path, line_num, .. }, action| {
+        move |cx,
+              FileResult {
+                  path,
+                  line_num,
+                  char_range,
+                  ..
+              },
+              action| {
             let doc = match cx.editor.open(path, action) {
                 Ok(id) => doc_mut!(cx.editor, &id),
                 Err(e) => {
@@ -2572,10 +2616,8 @@ fn global_search(cx: &mut Context) {
                 );
                 return;
             }
-            let start = text.line_to_char(line_num);
-            let end = text.line_to_char((line_num + 1).min(text.len_lines()));
 
-            doc.set_selection(view.id, Selection::single(start, end));
+            doc.set_selection(view.id, Selection::single(char_range.start, char_range.end));
             if action.align_view(view, doc.id()) {
                 align_view(doc, view, Align::Center);
             }
