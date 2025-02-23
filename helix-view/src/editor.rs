@@ -1111,6 +1111,7 @@ pub struct Editor {
 
     pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
+    pub file_explorer_selected_path: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1241,6 +1242,7 @@ impl Editor {
             handlers,
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),
+            file_explorer_selected_path: None,
         }
     }
 
