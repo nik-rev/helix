@@ -51,7 +51,10 @@
 | `find_prev_char` | Move to previous occurrence of char | normal: `` F `` |
 | `extend_till_prev_char` | Extend till previous occurrence of char | select: `` T `` |
 | `extend_prev_char` | Extend to previous occurrence of char | select: `` F `` |
-| `repeat_last_motion` | Repeat last motion | normal: `` <A-.> ``, select: `` <A-.> `` |
+| `repeat_last_motion` | Repeat last motion | normal: `` <A-.> `` |
+| `repeat_last_motion_reverse` | Repeat last motion in reverse | normal: `` <A-gt> `` |
+| `extend_repeat_last_motion` | Extend selection by repeating last motion | select: `` <A-.> `` |
+| `extend_repeat_last_motion_reverse` | Extend selection by repeating last motion in reverse | select: `` <A-gt> `` |
 | `replace` | Replace with new char | normal: `` r ``, select: `` r `` |
 | `switch_to_alternate_case` | Switch to aLTERNATE cASE | normal: `` ~ ``, `` `a ``, select: `` ~ ``, `` `a `` |
 | `switch_to_uppercase` | Switch to UPPERCASE | normal: `` `u ``, select: `` `u `` |
