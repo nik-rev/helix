@@ -35,6 +35,8 @@ pull-requests = [
   "12855",
   # bidirectional motion commands
   "12884",
+  # workspace runtime directory
+  "12823",
   # file explorer operations
   # "12902",
 ]
