@@ -1,0 +1,1032 @@
+From 6d986789942291a4d60565649dab71c92d1d20bd Mon Sep 17 00:00:00 2001
+From: Nikita Revenco <154856872+NikitaRevenco@users.noreply.github.com>
+Date: Thu, 6 Feb 2025 15:21:47 +0000
+Subject: [PATCH] feat: add display-color-swatches
+
+---
+ book/src/editor.md                      |   1 +
+ helix-core/src/syntax.rs                |  27 +++--
+ helix-core/src/text_annotations.rs      |   4 +-
+ helix-lsp/src/client.rs                 |  20 ++++
+ helix-term/src/commands/lsp.rs          | 151 ++++++++++++++++++++----
+ helix-term/src/commands/typed.rs        |   7 +-
+ helix-term/src/ui/document.rs           |   6 +-
+ helix-term/src/ui/editor.rs             |  54 +++++----
+ helix-term/src/ui/lsp/signature_help.rs |  12 +-
+ helix-term/src/ui/markdown.rs           |  10 +-
+ helix-view/src/document.rs              | 122 +++++++++++++++++--
+ helix-view/src/editor.rs                |   3 +
+ helix-view/src/theme.rs                 |   9 +-
+ helix-view/src/view.rs                  |  25 +++-
+ 14 files changed, 361 insertions(+), 90 deletions(-)
+
+diff --git a/book/src/editor.md b/book/src/editor.md
+index ae5f8af4..0098aa26 100644
+--- a/book/src/editor.md
++++ b/book/src/editor.md
+@@ -150,6 +150,7 @@ ### `[editor.lsp]` Section
+ | `display-progress-messages` | Display LSP progress messages below statusline[^1]    | `false` |
+ | `auto-signature-help` | Enable automatic popup of signature help (parameter hints)  | `true`  |
+ | `display-inlay-hints` | Display inlay hints[^2]                                     | `false` |
++| `display-color-swatches` | Shows color swatches next to colors | `true` |
+ | `display-signature-help-docs` | Display docs under signature help popup             | `true`  |
+ | `snippets`      | Enables snippet completions. Requires a server restart (`:lsp-restart`) to take effect after `:config-reload`/`:set`. | `true`  |
+ | `goto-reference-include-declaration` | Include declaration in the goto references popup. | `true`  |
+diff --git a/helix-core/src/syntax.rs b/helix-core/src/syntax.rs
+index a77d30e8..60a8478a 100644
+--- a/helix-core/src/syntax.rs
++++ b/helix-core/src/syntax.rs
+@@ -336,6 +336,7 @@ pub enum LanguageServerFeature {
+     Diagnostics,
+     RenameSymbol,
+     InlayHints,
++    ColorProvider,
+ }
+ 
+ impl Display for LanguageServerFeature {
+@@ -359,6 +360,7 @@ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+             Diagnostics => "diagnostics",
+             RenameSymbol => "rename-symbol",
+             InlayHints => "inlay-hints",
++            ColorProvider => "color-provider",
+         };
+         write!(f, "{feature}",)
+     }
+@@ -1786,7 +1788,12 @@ fn traverse(point: Point, text: &Tendril) -> Point {
+ 
+ /// Indicates which highlight should be applied to a region of source code.
+ #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+-pub struct Highlight(pub usize);
++pub enum Highlight {
++    /// When we use this type of highlight, we index into the Theme's scopes to get the Style
++    Indexed(usize),
++    /// A custom color, not dependent on the theme. Represents (red, green, blue)
++    Rgb(u8, u8, u8),
++}
+ 
+ /// Represents the reason why syntax highlighting failed.
+ #[derive(Debug, PartialEq, Eq)]
+@@ -2048,7 +2055,7 @@ pub fn configure(&self, recognized_names: &[String]) {
+                         best_match_len = len;
+                     }
+                 }
+-                best_index.map(Highlight)
++                best_index.map(Highlight::Indexed)
+             })
+             .collect();
+ 
+@@ -2580,10 +2587,10 @@ pub enum InjectionLanguageMarker<'a> {
+ 
+ pub struct Merge<I> {
+     iter: I,
+-    spans: Box<dyn Iterator<Item = (usize, std::ops::Range<usize>)>>,
++    spans: Box<dyn Iterator<Item = (Highlight, std::ops::Range<usize>)>>,
+ 
+     next_event: Option<HighlightEvent>,
+-    next_span: Option<(usize, std::ops::Range<usize>)>,
++    next_span: Option<(Highlight, std::ops::Range<usize>)>,
+ 
+     queue: Vec<HighlightEvent>,
+ }
+@@ -2591,7 +2598,7 @@ pub struct Merge<I> {
+ /// Merge a list of spans into the highlight event stream.
+ pub fn merge<I: Iterator<Item = HighlightEvent>>(
+     iter: I,
+-    spans: Vec<(usize, std::ops::Range<usize>)>,
++    spans: Vec<(Highlight, std::ops::Range<usize>)>,
+ ) -> Merge<I> {
+     let spans = Box::new(spans.into_iter());
+     let mut merge = Merge {
+@@ -2657,9 +2664,9 @@ fn next(&mut self) -> Option<Self::Item> {
+ 
+                 Some(event)
+             }
+-            (Some(Source { start, end }), Some((span, range))) if start == range.start => {
++            (Some(Source { start, end }), Some((highlight, range))) if start == range.start => {
+                 let intersect = range.end.min(end);
+-                let event = HighlightStart(Highlight(*span));
++                let event = HighlightStart(*highlight);
+ 
+                 // enqueue in reverse order
+                 self.queue.push(HighlightEnd);
+@@ -2682,7 +2689,7 @@ fn next(&mut self) -> Option<Self::Item> {
+                 if intersect == range.end {
+                     self.next_span = self.spans.next();
+                 } else {
+-                    self.next_span = Some((*span, intersect..range.end));
++                    self.next_span = Some((*highlight, intersect..range.end));
+                 }
+ 
+                 Some(event)
+@@ -2696,8 +2703,8 @@ fn next(&mut self) -> Option<Self::Item> {
+             // even though the range is past the end of the text.  This needs to be
+             // handled appropriately by the drawing code by not assuming that
+             // all `Source` events point to valid indices in the rope.
+-            (None, Some((span, range))) => {
+-                let event = HighlightStart(Highlight(*span));
++            (None, Some((highlight, range))) => {
++                let event = HighlightStart(*highlight);
+                 self.queue.push(HighlightEnd);
+                 self.queue.push(Source {
+                     start: range.start,
+diff --git a/helix-core/src/text_annotations.rs b/helix-core/src/text_annotations.rs
+index 9704c3d6..6802afb9 100644
+--- a/helix-core/src/text_annotations.rs
++++ b/helix-core/src/text_annotations.rs
+@@ -303,7 +303,7 @@ pub fn reset_pos(&self, char_idx: usize) {
+     pub fn collect_overlay_highlights(
+         &self,
+         char_range: Range<usize>,
+-    ) -> Vec<(usize, Range<usize>)> {
++    ) -> Vec<(Highlight, Range<usize>)> {
+         let mut highlights = Vec::new();
+         self.reset_pos(char_range.start);
+         for char_idx in char_range {
+@@ -311,7 +311,7 @@ pub fn collect_overlay_highlights(
+                 // we don't know the number of chars the original grapheme takes
+                 // however it doesn't matter as highlight boundaries are automatically
+                 // aligned to grapheme boundaries in the rendering code
+-                highlights.push((highlight.0, char_idx..char_idx + 1))
++                highlights.push((highlight, char_idx..char_idx + 1))
+             }
+         }
+ 
+diff --git a/helix-lsp/src/client.rs b/helix-lsp/src/client.rs
+index 3a50f20a..9d0bd90e 100644
+--- a/helix-lsp/src/client.rs
++++ b/helix-lsp/src/client.rs
+@@ -353,6 +353,7 @@ pub fn supports_feature(&self, feature: LanguageServerFeature) -> bool {
+                 capabilities.inlay_hint_provider,
+                 Some(OneOf::Left(true) | OneOf::Right(InlayHintServerCapabilities::Options(_)))
+             ),
++            LanguageServerFeature::ColorProvider => capabilities.color_provider.is_some(),
+         }
+     }
+ 
+@@ -1111,6 +1112,25 @@ pub fn text_document_range_inlay_hints(
+         Some(self.call::<lsp::request::InlayHintRequest>(params))
+     }
+ 
++    pub fn text_document_color_swatches(
++        &self,
++        text_document: lsp::TextDocumentIdentifier,
++        work_done_token: Option<lsp::ProgressToken>,
++    ) -> Option<impl Future<Output = Result<Value>>> {
++        self.capabilities.get().unwrap().color_provider.as_ref()?;
++        let params = lsp::DocumentColorParams {
++            text_document,
++            work_done_progress_params: lsp::WorkDoneProgressParams {
++                work_done_token: work_done_token.clone(),
++            },
++            partial_result_params: helix_lsp_types::PartialResultParams {
++                partial_result_token: work_done_token,
++            },
++        };
++
++        Some(self.call::<lsp::request::DocumentColor>(params))
++    }
++
+     pub fn text_document_hover(
+         &self,
+         text_document: lsp::TextDocumentIdentifier,
+diff --git a/helix-term/src/commands/lsp.rs b/helix-term/src/commands/lsp.rs
+index 626009f8..d5742836 100644
+--- a/helix-term/src/commands/lsp.rs
++++ b/helix-term/src/commands/lsp.rs
+@@ -14,12 +14,14 @@
+ use super::{align_view, push_jump, Align, Context, Editor};
+ 
+ use helix_core::{
+-    syntax::LanguageServerFeature, text_annotations::InlineAnnotation, textobject::Word, Selection,
+-    Uri,
++    syntax::{Highlight, LanguageServerFeature},
++    text_annotations::InlineAnnotation,
++    textobject::Word,
++    Selection, Uri,
+ };
+ use helix_stdx::path;
+ use helix_view::{
+-    document::{DocumentInlayHints, DocumentInlayHintsId},
++    document::{ColorSwatchesId, DocumentColorSwatches, DocumentInlayHints, DocumentInlayHintsId},
+     editor::Action,
+     handlers::lsp::SignatureHelpInvoked,
+     theme::Style,
+@@ -1311,18 +1313,29 @@ pub fn select_references_to_symbol_under_cursor(cx: &mut Context) {
+     );
+ }
+ 
+-pub fn compute_inlay_hints_for_all_views(editor: &mut Editor, jobs: &mut crate::job::Jobs) {
+-    if !editor.config().lsp.display_inlay_hints {
++pub fn compute_lsp_annotations_for_all_views(editor: &mut Editor, jobs: &mut crate::job::Jobs) {
++    let display_inlay_hints = editor.config().lsp.display_inlay_hints;
++    let display_color_swatches = editor.config().lsp.display_color_swatches;
++
++    if !display_inlay_hints && !display_color_swatches {
+         return;
+     }
+ 
+     for (view, _) in editor.tree.views() {
+-        let doc = match editor.documents.get(&view.doc) {
+-            Some(doc) => doc,
+-            None => continue,
++        let Some(doc) = editor.documents.get(&view.doc) else {
++            continue;
+         };
+-        if let Some(callback) = compute_inlay_hints_for_view(view, doc) {
+-            jobs.callback(callback);
++
++        if display_inlay_hints {
++            if let Some(callback) = compute_inlay_hints_for_view(view, doc) {
++                jobs.callback(callback);
++            }
++        }
++
++        if display_color_swatches {
++            if let Some(callback) = compute_color_swatches_for_view(view, doc) {
++                jobs.callback(callback);
++            }
+         }
+     }
+ }
+@@ -1338,20 +1351,7 @@ fn compute_inlay_hints_for_view(
+         .language_servers_with_feature(LanguageServerFeature::InlayHints)
+         .next()?;
+ 
+-    let doc_text = doc.text();
+-    let len_lines = doc_text.len_lines();
+-
+-    // Compute ~3 times the current view height of inlay hints, that way some scrolling
+-    // will not show half the view with hints and half without while still being faster
+-    // than computing all the hints for the full file (which could be dozens of time
+-    // longer than the view is).
+-    let view_height = view.inner_height();
+-    let first_visible_line =
+-        doc_text.char_to_line(doc.view_offset(view_id).anchor.min(doc_text.len_chars()));
+-    let first_line = first_visible_line.saturating_sub(view_height);
+-    let last_line = first_visible_line
+-        .saturating_add(view_height.saturating_mul(2))
+-        .min(len_lines);
++    let (first_line, last_line) = doc.inline_annotations_line_range(view.inner_height(), view.id);
+ 
+     let new_doc_inlay_hints_id = DocumentInlayHintsId {
+         first_line,
+@@ -1366,6 +1366,7 @@ fn compute_inlay_hints_for_view(
+         return None;
+     }
+ 
++    let doc_text = doc.text();
+     let doc_slice = doc_text.slice(..);
+     let first_char_in_range = doc_slice.line_to_char(first_line);
+     let last_char_in_range = doc_slice.line_to_char(last_line);
+@@ -1407,7 +1408,7 @@ fn compute_inlay_hints_for_view(
+ 
+             // Most language servers will already send them sorted but ensure this is the case to
+             // avoid errors on our end.
+-            hints.sort_by_key(|inlay_hint| inlay_hint.position);
++            hints.sort_unstable_by_key(|inlay_hint| inlay_hint.position);
+ 
+             let mut padding_before_inlay_hints = Vec::new();
+             let mut type_inlay_hints = Vec::new();
+@@ -1471,3 +1472,103 @@ fn compute_inlay_hints_for_view(
+ 
+     Some(callback)
+ }
++
++fn compute_color_swatches_for_view(
++    view: &View,
++    doc: &Document,
++) -> Option<std::pin::Pin<Box<impl Future<Output = Result<crate::job::Callback, anyhow::Error>>>>> {
++    let view_id = view.id;
++    let doc_id = view.doc;
++
++    let language_server = doc
++        .language_servers_with_feature(LanguageServerFeature::ColorProvider)
++        .next()?;
++
++    let (first_line, last_line) = doc.inline_annotations_line_range(view.inner_height(), view.id);
++
++    let new_doc_color_swatches_id = ColorSwatchesId {
++        first_line,
++        last_line,
++    };
++
++    // Don't recompute the color swatches in case nothing has changed about the view
++    if !doc.color_swatches_outdated
++        && doc
++            .color_swatches(view_id)
++            .is_some_and(|doc_color_swatches| doc_color_swatches.id == new_doc_color_swatches_id)
++    {
++        return None;
++    }
++
++    let offset_encoding = language_server.offset_encoding();
++
++    let callback = super::make_job_callback(
++        language_server.text_document_color_swatches(doc.identifier(), None)?,
++        move |editor, _compositor, response: Option<Vec<lsp::ColorInformation>>| {
++            // The config was modified or the window was closed while the request was in flight
++            if !editor.config().lsp.display_color_swatches || editor.tree.try_get(view_id).is_none()
++            {
++                return;
++            }
++
++            // Add annotations to relevant document, not the current one (it may have changed in between)
++            let Some(doc) = editor.documents.get_mut(&doc_id) else {
++                return;
++            };
++
++            // If color swatches are empty or we don't have a response,
++            // empty the color swatches since they're now outdated
++            let mut swatches = match response {
++                Some(swatches) if !swatches.is_empty() => swatches,
++                _ => {
++                    doc.set_color_swatches(
++                        view_id,
++                        DocumentColorSwatches::empty_with_id(new_doc_color_swatches_id),
++                    );
++                    return;
++                }
++            };
++
++            // Most language servers will already send them sorted but
++            // we ensure this is the case to avoid errors on our end.
++            swatches.sort_unstable_by_key(|swatch| swatch.range.start);
++
++            let swatch_count = swatches.len();
++
++            let mut color_swatches = Vec::with_capacity(swatch_count);
++            let mut color_swatches_padding = Vec::with_capacity(swatch_count);
++            let mut colors = Vec::with_capacity(swatch_count);
++
++            let doc_text = doc.text();
++
++            for swatch in swatches {
++                let Some(swatch_index) =
++                    helix_lsp::util::lsp_pos_to_pos(doc_text, swatch.range.start, offset_encoding)
++                else {
++                    // Skip color swatches that have no "real" position
++                    continue;
++                };
++
++                color_swatches.push(vec![InlineAnnotation::new(swatch_index, "■")]);
++                color_swatches_padding.push(InlineAnnotation::new(swatch_index, " "));
++                colors.push(Highlight::Rgb(
++                    (swatch.color.red * 255.) as u8,
++                    (swatch.color.green * 255.) as u8,
++                    (swatch.color.blue * 255.) as u8,
++                ));
++            }
++
++            doc.set_color_swatches(
++                view_id,
++                DocumentColorSwatches {
++                    id: new_doc_color_swatches_id,
++                    colors,
++                    color_swatches,
++                    color_swatches_padding,
++                },
++            );
++        },
++    );
++
++    Some(callback)
++}
+diff --git a/helix-term/src/commands/typed.rs b/helix-term/src/commands/typed.rs
+index f9610b3b..9bc00b8e 100644
+--- a/helix-term/src/commands/typed.rs
++++ b/helix-term/src/commands/typed.rs
+@@ -10,7 +10,7 @@
+ 
+ use helix_core::fuzzy::fuzzy_match;
+ use helix_core::indent::MAX_INDENT;
+-use helix_core::syntax::NodeSearch;
++use helix_core::syntax::{Highlight, NodeSearch};
+ use helix_core::tree_sitter::Node;
+ use helix_core::{line_ending, shellwords::Shellwords};
+ use helix_stdx::path::home_dir;
+@@ -1777,7 +1777,10 @@ fn find_highlight_at_cursor(
+         return Ok(());
+     };
+ 
+-    let content = cx.editor.theme.scope(highlight.0).to_string();
++    let content = match highlight {
++        Highlight::Indexed(idx) => cx.editor.theme.scope(idx).to_string(),
++        Highlight::Rgb(r, g, b) => format!("rgb({r}, {g}, {b})"),
++    };
+ 
+     let callback = async move {
+         let call: job::Callback = Callback::EditorCompositor(Box::new(
+diff --git a/helix-term/src/ui/document.rs b/helix-term/src/ui/document.rs
+index 8423ae8e..fb158da0 100644
+--- a/helix-term/src/ui/document.rs
++++ b/helix-term/src/ui/document.rs
+@@ -56,8 +56,8 @@ fn next(&mut self) -> Option<(Style, usize)> {
+                     let style = self
+                         .active_highlights
+                         .iter()
+-                        .fold(self.text_style, |acc, span| {
+-                            acc.patch(self.theme.highlight(span.0))
++                        .fold(self.text_style, |acc, highlight| {
++                            acc.patch(self.theme.highlight_to_style(*highlight))
+                         });
+                     if self.kind == StyleIterKind::BaseHighlights {
+                         // Move the end byte index to the nearest character boundary (rounding up)
+@@ -221,7 +221,7 @@ pub fn render_text(
+         let grapheme_style = if let GraphemeSource::VirtualText { highlight } = grapheme.source {
+             let mut style = renderer.text_style;
+             if let Some(highlight) = highlight {
+-                style = style.patch(theme.highlight(highlight.0));
++                style = style.patch(theme.highlight_to_style(highlight));
+             }
+             GraphemeStyle {
+                 syntax_style: style,
+diff --git a/helix-term/src/ui/editor.rs b/helix-term/src/ui/editor.rs
+index 1275ad36..6646e9ad 100644
+--- a/helix-term/src/ui/editor.rs
++++ b/helix-term/src/ui/editor.rs
+@@ -19,7 +19,7 @@
+     diagnostic::NumberOrString,
+     graphemes::{next_grapheme_boundary, prev_grapheme_boundary},
+     movement::Direction,
+-    syntax::{self, HighlightEvent},
++    syntax::{self, Highlight, HighlightEvent},
+     text_annotations::TextAnnotations,
+     unicode::width::UnicodeWidthStr,
+     visual_offset_from_block, Change, Position, Range, Selection, Transaction,
+@@ -359,7 +359,7 @@ pub fn overlay_syntax_highlights(
+         anchor: usize,
+         height: u16,
+         text_annotations: &TextAnnotations,
+-    ) -> Vec<(usize, std::ops::Range<usize>)> {
++    ) -> Vec<(Highlight, std::ops::Range<usize>)> {
+         let text = doc.text().slice(..);
+         let row = text.char_to_line(anchor.min(text.len_chars()));
+ 
+@@ -373,7 +373,7 @@ pub fn overlay_syntax_highlights(
+     pub fn doc_diagnostics_highlights(
+         doc: &Document,
+         theme: &Theme,
+-    ) -> [Vec<(usize, std::ops::Range<usize>)>; 7] {
++    ) -> [Vec<(Highlight, std::ops::Range<usize>)>; 7] {
+         use helix_core::diagnostic::{DiagnosticTag, Range, Severity};
+         let get_scope_of = |scope| {
+             theme
+@@ -398,7 +398,7 @@ pub fn doc_diagnostics_highlights(
+         let unnecessary = theme.find_scope_index_exact("diagnostic.unnecessary");
+         let deprecated = theme.find_scope_index_exact("diagnostic.deprecated");
+ 
+-        let mut default_vec: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
++        let mut default_vec: Vec<(Highlight, std::ops::Range<usize>)> = Vec::new();
+         let mut info_vec = Vec::new();
+         let mut hint_vec = Vec::new();
+         let mut warning_vec = Vec::new();
+@@ -407,7 +407,7 @@ pub fn doc_diagnostics_highlights(
+         let mut deprecated_vec = Vec::new();
+ 
+         let push_diagnostic =
+-            |vec: &mut Vec<(usize, std::ops::Range<usize>)>, scope, range: Range| {
++            |vec: &mut Vec<(Highlight, std::ops::Range<usize>)>, scope, range: Range| {
+                 // If any diagnostic overlaps ranges with the prior diagnostic,
+                 // merge the two together. Otherwise push a new span.
+                 match vec.last_mut() {
+@@ -443,19 +443,27 @@ pub fn doc_diagnostics_highlights(
+                     Some(Severity::Warning | Severity::Error)
+                 )
+             {
+-                push_diagnostic(vec, scope, diagnostic.range);
++                push_diagnostic(vec, Highlight::Indexed(scope), diagnostic.range);
+             }
+ 
+             for tag in &diagnostic.tags {
+                 match tag {
+                     DiagnosticTag::Unnecessary => {
+                         if let Some(scope) = unnecessary {
+-                            push_diagnostic(&mut unnecessary_vec, scope, diagnostic.range)
++                            push_diagnostic(
++                                &mut unnecessary_vec,
++                                Highlight::Indexed(scope),
++                                diagnostic.range,
++                            )
+                         }
+                     }
+                     DiagnosticTag::Deprecated => {
+                         if let Some(scope) = deprecated {
+-                            push_diagnostic(&mut deprecated_vec, scope, diagnostic.range)
++                            push_diagnostic(
++                                &mut deprecated_vec,
++                                Highlight::Indexed(scope),
++                                diagnostic.range,
++                            )
+                         }
+                     }
+                 }
+@@ -481,7 +489,7 @@ pub fn doc_selection_highlights(
+         theme: &Theme,
+         cursor_shape_config: &CursorShapeConfig,
+         is_terminal_focused: bool,
+-    ) -> Vec<(usize, std::ops::Range<usize>)> {
++    ) -> Vec<(Highlight, std::ops::Range<usize>)> {
+         let text = doc.text().slice(..);
+         let selection = doc.selection(view.id);
+         let primary_idx = selection.primary_index();
+@@ -517,7 +525,7 @@ pub fn doc_selection_highlights(
+         }
+         .unwrap_or(base_primary_cursor_scope);
+ 
+-        let mut spans: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
++        let mut spans: Vec<(Highlight, std::ops::Range<usize>)> = Vec::new();
+         for (i, range) in selection.iter().enumerate() {
+             let selection_is_primary = i == primary_idx;
+             let (cursor_scope, selection_scope) = if selection_is_primary {
+@@ -534,7 +542,7 @@ pub fn doc_selection_highlights(
+                     // underline cursor (eg. when a regex prompt has focus) then
+                     // the primary cursor will be invisible. This doesn't happen
+                     // with block cursors since we manually draw *all* cursors.
+-                    spans.push((cursor_scope, range.head..range.head + 1));
++                    spans.push((Highlight::Indexed(cursor_scope), range.head..range.head + 1));
+                 }
+                 continue;
+             }
+@@ -550,11 +558,14 @@ pub fn doc_selection_highlights(
+                     } else {
+                         cursor_start
+                     };
+-                spans.push((selection_scope, range.anchor..selection_end));
++                spans.push((
++                    Highlight::Indexed(selection_scope),
++                    range.anchor..selection_end,
++                ));
+                 // add block cursors
+                 // skip primary cursor if terminal is unfocused - crossterm cursor is used in that case
+                 if !selection_is_primary || (cursor_is_block && is_terminal_focused) {
+-                    spans.push((cursor_scope, cursor_start..range.head));
++                    spans.push((Highlight::Indexed(cursor_scope), cursor_start..range.head));
+                 }
+             } else {
+                 // Reverse case.
+@@ -562,7 +573,7 @@ pub fn doc_selection_highlights(
+                 // add block cursors
+                 // skip primary cursor if terminal is unfocused - crossterm cursor is used in that case
+                 if !selection_is_primary || (cursor_is_block && is_terminal_focused) {
+-                    spans.push((cursor_scope, range.head..cursor_end));
++                    spans.push((Highlight::Indexed(cursor_scope), range.head..cursor_end));
+                 }
+                 // non block cursors look like they exclude the cursor
+                 let selection_start = if selection_is_primary
+@@ -573,7 +584,10 @@ pub fn doc_selection_highlights(
+                 } else {
+                     cursor_end
+                 };
+-                spans.push((selection_scope, selection_start..range.anchor));
++                spans.push((
++                    Highlight::Indexed(selection_scope),
++                    selection_start..range.anchor,
++                ));
+             }
+         }
+ 
+@@ -585,7 +599,7 @@ pub fn highlight_focused_view_elements(
+         view: &View,
+         doc: &Document,
+         theme: &Theme,
+-    ) -> Vec<(usize, std::ops::Range<usize>)> {
++    ) -> Vec<(Highlight, std::ops::Range<usize>)> {
+         // Highlight matching braces
+         if let Some(syntax) = doc.syntax() {
+             let text = doc.text().slice(..);
+@@ -597,7 +611,7 @@ pub fn highlight_focused_view_elements(
+             {
+                 // ensure col is on screen
+                 if let Some(highlight) = theme.find_scope_index_exact("ui.cursor.match") {
+-                    return vec![(highlight, pos..pos + 1)];
++                    return vec![(Highlight::Indexed(highlight), pos..pos + 1)];
+                 }
+             }
+         }
+@@ -607,7 +621,7 @@ pub fn highlight_focused_view_elements(
+     pub fn tabstop_highlights(
+         doc: &Document,
+         theme: &Theme,
+-    ) -> Option<Vec<(usize, std::ops::Range<usize>)>> {
++    ) -> Option<Vec<(Highlight, std::ops::Range<usize>)>> {
+         let snippet = doc.active_snippet.as_ref()?;
+         let highlight = theme.find_scope_index_exact("tabstop")?;
+         let mut highlights = Vec::new();
+@@ -616,7 +630,7 @@ pub fn tabstop_highlights(
+                 tabstop
+                     .ranges
+                     .iter()
+-                    .map(|range| (highlight, range.start..range.end)),
++                    .map(|range| (Highlight::Indexed(highlight), range.start..range.end)),
+             );
+         }
+         (!highlights.is_empty()).then_some(highlights)
+@@ -1121,7 +1135,7 @@ pub fn clear_completion(&mut self, editor: &mut Editor) -> Option<OnKeyCallback>
+     }
+ 
+     pub fn handle_idle_timeout(&mut self, cx: &mut commands::Context) -> EventResult {
+-        commands::compute_inlay_hints_for_all_views(cx.editor, cx.jobs);
++        commands::compute_lsp_annotations_for_all_views(cx.editor, cx.jobs);
+ 
+         EventResult::Ignored(None)
+     }
+diff --git a/helix-term/src/ui/lsp/signature_help.rs b/helix-term/src/ui/lsp/signature_help.rs
+index 2dee8124..1a2bdf67 100644
+--- a/helix-term/src/ui/lsp/signature_help.rs
++++ b/helix-term/src/ui/lsp/signature_help.rs
+@@ -1,7 +1,7 @@
+ use std::sync::Arc;
+ 
+ use arc_swap::ArcSwap;
+-use helix_core::syntax;
++use helix_core::syntax::{self, Highlight};
+ use helix_view::graphics::{Margin, Rect, Style};
+ use helix_view::input::Event;
+ use tui::buffer::Buffer;
+@@ -103,10 +103,12 @@ fn render(&mut self, area: Rect, surface: &mut Buffer, cx: &mut Context) {
+ 
+         let active_param_span = signature.active_param_range.map(|(start, end)| {
+             vec![(
+-                cx.editor
+-                    .theme
+-                    .find_scope_index_exact("ui.selection")
+-                    .unwrap(),
++                Highlight::Indexed(
++                    cx.editor
++                        .theme
++                        .find_scope_index_exact("ui.selection")
++                        .unwrap(),
++                ),
+                 start..end,
+             )]
+         });
+diff --git a/helix-term/src/ui/markdown.rs b/helix-term/src/ui/markdown.rs
+index 0e6d43f4..8060484a 100644
+--- a/helix-term/src/ui/markdown.rs
++++ b/helix-term/src/ui/markdown.rs
+@@ -10,7 +10,7 @@
+ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+ 
+ use helix_core::{
+-    syntax::{self, HighlightEvent, InjectionLanguageMarker, Syntax},
++    syntax::{self, Highlight, HighlightEvent, InjectionLanguageMarker, Syntax},
+     RopeSlice,
+ };
+ use helix_view::{
+@@ -33,7 +33,7 @@ pub fn highlighted_code_block<'a>(
+     language: &str,
+     theme: Option<&Theme>,
+     config_loader: Arc<ArcSwap<syntax::Loader>>,
+-    additional_highlight_spans: Option<Vec<(usize, std::ops::Range<usize>)>>,
++    additional_highlight_spans: Option<Vec<(Highlight, std::ops::Range<usize>)>>,
+ ) -> Text<'a> {
+     let mut spans = Vec::new();
+     let mut lines = Vec::new();
+@@ -81,9 +81,9 @@ pub fn highlighted_code_block<'a>(
+                 highlights.pop();
+             }
+             HighlightEvent::Source { start, end } => {
+-                let style = highlights
+-                    .iter()
+-                    .fold(text_style, |acc, span| acc.patch(theme.highlight(span.0)));
++                let style = highlights.iter().fold(text_style, |acc, span| {
++                    acc.patch(theme.highlight_to_style(*span))
++                });
+ 
+                 let mut slice = &text[start..end];
+                 // TODO: do we need to handle all unicode line endings
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index 860cd046..1ad1ac5b 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -144,12 +144,17 @@ pub struct Document {
+     ///
+     /// To know if they're up-to-date, check the `id` field in `DocumentInlayHints`.
+     pub(crate) inlay_hints: HashMap<ViewId, DocumentInlayHints>,
++    /// Color swatches for the document
++    ///
++    /// To know if they're up-to-date, check the `id` field in `DocumentColorSwatches`.
++    pub(crate) color_swatches: HashMap<ViewId, DocumentColorSwatches>,
+     pub(crate) jump_labels: HashMap<ViewId, Vec<Overlay>>,
+     /// Used to highlight specific text in the document that may be of interest
+     pub(crate) highlights: HashMap<ViewId, Vec<Overlay>>,
+     /// Set to `true` when the document is updated, reset to `false` on the next inlay hints
+     /// update from the LSP
+     pub inlay_hints_oudated: bool,
++    pub color_swatches_outdated: bool,
+ 
+     path: Option<PathBuf>,
+     relative_path: OnceCell<Option<PathBuf>>,
+@@ -271,6 +276,50 @@ pub struct DocumentInlayHintsId {
+     pub last_line: usize,
+ }
+ 
++/// Color swatches for a single `(Document, View)` combo.
++///
++/// Color swatches are always `InlineAnnotation`s, not overlays or line-ones: LSP may choose to place
++/// them anywhere in the text and will sometime offer config options to move them where the user
++/// wants them but it shouldn't be Helix who decides that so we use the most precise positioning.
++#[derive(Debug, Clone)]
++pub struct DocumentColorSwatches {
++    /// Identifier for the color swatches stored in this structure. To be checked to know if they have
++    /// to be recomputed on idle or not.
++    pub id: ColorSwatchesId,
++
++    // Each Vec<InlineAnnotation> only has 1 InlineAnnotation
++    pub color_swatches: Vec<Vec<InlineAnnotation>>,
++    pub colors: Vec<Highlight>,
++
++    pub color_swatches_padding: Vec<InlineAnnotation>,
++}
++
++impl DocumentColorSwatches {
++    /// Generate an empty list of color swatches with the given ID.
++    pub fn empty_with_id(id: ColorSwatchesId) -> Self {
++        Self {
++            id,
++            color_swatches: vec![],
++            color_swatches_padding: vec![],
++            colors: vec![],
++        }
++    }
++}
++
++/// Associated with a [`Document`] and [`ViewId`], uniquely identifies the state of color swatches for
++/// for that document and view: if this changed since the last save, the color swatches for the view
++/// should be recomputed.
++///
++/// We can't store the `ViewOffset` instead of the first and last asked-for lines because if
++/// softwrapping changes, the `ViewOffset` may not change while the displayed lines will.
++#[derive(Debug, Copy, Clone, PartialEq, Eq)]
++pub struct ColorSwatchesId {
++    /// First line for which the document color was requested.
++    pub first_line: usize,
++    /// Last line for which the document color was requested.
++    pub last_line: usize,
++}
++
+ use std::{fmt, mem};
+ impl fmt::Debug for Document {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -280,6 +329,7 @@ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+             .field("selections", &self.selections)
+             .field("inlay_hints_oudated", &self.inlay_hints_oudated)
+             .field("text_annotations", &self.inlay_hints)
++            .field("color_swatches", &self.color_swatches)
+             .field("view_data", &self.view_data)
+             .field("path", &self.path)
+             .field("encoding", &self.encoding)
+@@ -682,6 +732,8 @@ pub fn from(
+             selections: HashMap::default(),
+             inlay_hints: HashMap::default(),
+             inlay_hints_oudated: false,
++            color_swatches: HashMap::default(),
++            color_swatches_outdated: false,
+             view_data: Default::default(),
+             indent_style: DEFAULT_INDENT,
+             line_ending,
+@@ -1291,10 +1343,11 @@ pub fn mark_as_focused(&mut self) {
+         self.focused_at = std::time::Instant::now();
+     }
+ 
+-    /// Remove a view's selection and inlay hints from this document.
++    /// Remove a view's selection, inlay hints and color swatches from this document.
+     pub fn remove_view(&mut self, view_id: ViewId) {
+         self.selections.remove(&view_id);
+         self.inlay_hints.remove(&view_id);
++        self.color_swatches.remove(&view_id);
+         self.jump_labels.remove(&view_id);
+         self.highlights.remove(&view_id);
+     }
+@@ -1426,8 +1479,8 @@ fn apply_impl(
+         self.diagnostics
+             .sort_by_key(|diagnostic| (diagnostic.range, diagnostic.severity, diagnostic.provider));
+ 
+-        // Update the inlay hint annotations' positions, helping ensure they are displayed in the proper place
+-        let apply_inlay_hint_changes = |annotations: &mut Vec<InlineAnnotation>| {
++        // Update the inline annotations' positions, helping ensure they are displayed in the proper place
++        let apply_inline_annotations_changes = |annotations: &mut Vec<InlineAnnotation>| {
+             changes.update_positions(
+                 annotations
+                     .iter_mut()
+@@ -1436,6 +1489,7 @@ fn apply_impl(
+         };
+ 
+         self.inlay_hints_oudated = true;
++        self.color_swatches_outdated = true;
+         for text_annotation in self.inlay_hints.values_mut() {
+             let DocumentInlayHints {
+                 id: _,
+@@ -1446,11 +1500,26 @@ fn apply_impl(
+                 padding_after_inlay_hints,
+             } = text_annotation;
+ 
+-            apply_inlay_hint_changes(padding_before_inlay_hints);
+-            apply_inlay_hint_changes(type_inlay_hints);
+-            apply_inlay_hint_changes(parameter_inlay_hints);
+-            apply_inlay_hint_changes(other_inlay_hints);
+-            apply_inlay_hint_changes(padding_after_inlay_hints);
++            apply_inline_annotations_changes(padding_before_inlay_hints);
++            apply_inline_annotations_changes(type_inlay_hints);
++            apply_inline_annotations_changes(parameter_inlay_hints);
++            apply_inline_annotations_changes(other_inlay_hints);
++            apply_inline_annotations_changes(padding_after_inlay_hints);
++        }
++
++        for text_annotation in self.color_swatches.values_mut() {
++            let DocumentColorSwatches {
++                id: _,
++                colors: _,
++                color_swatches,
++                color_swatches_padding,
++            } = text_annotation;
++
++            for color_swatch in color_swatches {
++                apply_inline_annotations_changes(color_swatch);
++            }
++
++            apply_inline_annotations_changes(color_swatches_padding);
+         }
+ 
+         helix_event::dispatch(DocumentDidChange {
+@@ -2208,7 +2277,7 @@ pub fn text_format(&self, mut viewport_width: u16, theme: Option<&Theme>) -> Tex
+             wrap_indicator: wrap_indicator.into_boxed_str(),
+             wrap_indicator_highlight: theme
+                 .and_then(|theme| theme.find_scope_index("ui.virtual.wrap"))
+-                .map(Highlight),
++                .map(Highlight::Indexed),
+             soft_wrap_at_text_width,
+         }
+     }
+@@ -2218,6 +2287,11 @@ pub fn set_inlay_hints(&mut self, view_id: ViewId, inlay_hints: DocumentInlayHin
+         self.inlay_hints.insert(view_id, inlay_hints);
+     }
+ 
++    pub fn set_color_swatches(&mut self, view_id: ViewId, color_swatches: DocumentColorSwatches) {
++        self.color_swatches.insert(view_id, color_swatches);
++        self.color_swatches_outdated = false;
++    }
++
+     pub fn set_jump_labels(&mut self, view_id: ViewId, labels: Vec<Overlay>) {
+         self.jump_labels.insert(view_id, labels);
+     }
+@@ -2239,11 +2313,41 @@ pub fn inlay_hints(&self, view_id: ViewId) -> Option<&DocumentInlayHints> {
+         self.inlay_hints.get(&view_id)
+     }
+ 
++    /// Get the color swatches for this document and `view_id`.
++    pub fn color_swatches(&self, view_id: ViewId) -> Option<&DocumentColorSwatches> {
++        self.color_swatches.get(&view_id)
++    }
++
+     /// Completely removes all the inlay hints saved for the document, dropping them to free memory
+     /// (since it often means inlay hints have been fully deactivated).
+     pub fn reset_all_inlay_hints(&mut self) {
+         self.inlay_hints = Default::default();
+     }
++
++    /// Compute the range of lines for which inline annotations should be
++    /// computed, which will be ~3 times the current view height.
++    ///
++    /// That way some scrolling will not show half the view with annotations
++    /// half without while still being faster than computing all the hints
++    /// for the full file
++    pub fn inline_annotations_line_range(
++        &self,
++        view_height: usize,
++        view_id: ViewId,
++    ) -> (usize, usize) {
++        let doc_text = self.text();
++        let len_lines = doc_text.len_lines();
++
++        let first_visible_line =
++            doc_text.char_to_line(self.view_offset(view_id).anchor.min(doc_text.len_chars()));
++
++        let first_line = first_visible_line.saturating_sub(view_height);
++        let last_line = first_visible_line
++            .saturating_add(view_height.saturating_mul(2))
++            .min(len_lines);
++
++        (first_line, last_line)
++    }
+ }
+ 
+ #[derive(Debug, Default)]
+diff --git a/helix-view/src/editor.rs b/helix-view/src/editor.rs
+index cdb14e0a..22e1f124 100644
+--- a/helix-view/src/editor.rs
++++ b/helix-view/src/editor.rs
+@@ -446,6 +446,8 @@ pub struct LspConfig {
+     pub display_signature_help_docs: bool,
+     /// Display inlay hints
+     pub display_inlay_hints: bool,
++    /// Display color swatches
++    pub display_color_swatches: bool,
+     /// Whether to enable snippet support
+     pub snippets: bool,
+     /// Whether to include declaration in the goto reference query
+@@ -461,6 +463,7 @@ fn default() -> Self {
+             auto_signature_help: true,
+             display_signature_help_docs: true,
+             display_inlay_hints: false,
++            display_color_swatches: true,
+             snippets: true,
+             goto_reference_include_declaration: true,
+         }
+diff --git a/helix-view/src/theme.rs b/helix-view/src/theme.rs
+index c3f6af88..c8e3dcd8 100644
+--- a/helix-view/src/theme.rs
++++ b/helix-view/src/theme.rs
+@@ -5,7 +5,7 @@
+ };
+ 
+ use anyhow::{anyhow, Result};
+-use helix_core::hashmap;
++use helix_core::{hashmap, syntax::Highlight};
+ use helix_loader::merge_toml_values;
+ use log::warn;
+ use once_cell::sync::Lazy;
+@@ -294,8 +294,11 @@ fn build_theme_values(
+ 
+ impl Theme {
+     #[inline]
+-    pub fn highlight(&self, index: usize) -> Style {
+-        self.highlights[index]
++    pub fn highlight_to_style(&self, highlight: Highlight) -> Style {
++        match highlight {
++            Highlight::Indexed(idx) => self.highlights[idx],
++            Highlight::Rgb(r, g, b) => Style::default().fg(Color::Rgb(r, g, b)),
++        }
+     }
+ 
+     #[inline]
+diff --git a/helix-view/src/view.rs b/helix-view/src/view.rs
+index 9ffac524..4e8d61d5 100644
+--- a/helix-view/src/view.rs
++++ b/helix-view/src/view.rs
+@@ -1,7 +1,7 @@
+ use crate::{
+     align_view,
+     annotations::diagnostics::InlineDiagnostics,
+-    document::DocumentInlayHints,
++    document::{DocumentColorSwatches, DocumentInlayHints},
+     editor::{GutterConfig, GutterType},
+     graphics::Rect,
+     handlers::diagnostics::DiagnosticsHandler,
+@@ -448,14 +448,14 @@ pub fn text_annotations<'a>(
+         if let Some(labels) = doc.jump_labels.get(&self.id) {
+             let style = theme
+                 .and_then(|t| t.find_scope_index("ui.virtual.jump-label"))
+-                .map(Highlight);
++                .map(Highlight::Indexed);
+             text_annotations.add_overlay(labels, style);
+         }
+ 
+         if let Some(highlights) = doc.highlights.get(&self.id) {
+             let style = theme
+                 .and_then(|t| t.find_scope_index("ui.selection"))
+-                .map(Highlight);
++                .map(Highlight::Indexed);
+             text_annotations.add_overlay(highlights, style);
+         }
+ 
+@@ -470,13 +470,13 @@ pub fn text_annotations<'a>(
+         {
+             let type_style = theme
+                 .and_then(|t| t.find_scope_index("ui.virtual.inlay-hint.type"))
+-                .map(Highlight);
++                .map(Highlight::Indexed);
+             let parameter_style = theme
+                 .and_then(|t| t.find_scope_index("ui.virtual.inlay-hint.parameter"))
+-                .map(Highlight);
++                .map(Highlight::Indexed);
+             let other_style = theme
+                 .and_then(|t| t.find_scope_index("ui.virtual.inlay-hint"))
+-                .map(Highlight);
++                .map(Highlight::Indexed);
+ 
+             // Overlapping annotations are ignored apart from the first so the order here is not random:
+             // types -> parameters -> others should hopefully be the "correct" order for most use cases,
+@@ -488,6 +488,19 @@ pub fn text_annotations<'a>(
+                 .add_inline_annotations(other_inlay_hints, other_style)
+                 .add_inline_annotations(padding_after_inlay_hints, None);
+         };
++        if let Some(DocumentColorSwatches {
++            id: _,
++            colors,
++            color_swatches,
++            color_swatches_padding,
++        }) = doc.color_swatches.get(&self.id)
++        {
++            for (color_swatch, color) in color_swatches.iter().zip(colors) {
++                text_annotations.add_inline_annotations(color_swatch, Some(*color));
++            }
++
++            text_annotations.add_inline_annotations(color_swatches_padding, None);
++        };
+         let config = doc.config.load();
+         let width = self.inner_width(doc);
+         let enable_cursor_line = self
+-- 
+2.47.0
+

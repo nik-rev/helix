@@ -1,0 +1,32 @@
+# main repository to fetch from
+repo = "helix-editor/helix"
+
+# the repository's branch
+remote-branch = "master"
+
+# This is the branch where you will see all result from patchy's work. Set it to any branch you want.
+# WARNING: Make sure you do not store any important work on this branch. It will be erased.
+local-branch = "patchy"
+
+# List of pull requests which you would like to merge
+# TIP: Add comments above pull requests to help yourself understand which PRs do what
+pull-requests = [
+  # highlight rust string interpolation macros
+  # "12768",
+  # tree-house
+  "12972",
+  # full screen overlays
+  "12311",
+  # select around quote
+  "12494",
+  # change case of text
+  "12043",
+  # statusline.merge-with-commandline
+  "12204",
+  # display long status message as poups
+  "12241",
+  # picker titles
+  "12520",
+  # extra variable expansions
+  "13068",
+]
