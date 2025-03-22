@@ -167,8 +167,8 @@ for defining custom keybindings, setting themes, etc.
 For everything else (e.g., how to install supported language servers), see the <a href="https://github.com/helix-editor/helix/wiki">Helix Wiki</a>.</p>
 <p>Refer the <a href="https://github.com/helix-editor/helix/wiki/FAQ">FAQ</a> for common questions.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="installing-helix"><a class="header" href="#installing-helix">Installing Helix</a></h1>
-<p>To install Helix, follow the instructions specific to your operating system.
-Note that:</p>
+<p>The typical way to install Helix is via <a href="./package-managers.html">your operating system's package manager</a>.</p>
+<p>Note that:</p>
 <ul>
 <li>
 <p>To get the latest nightly version of Helix, you need to
@@ -1787,7 +1787,7 @@ Languages</a> guide for more language configuration information.</p>
 <tr><td>spicedb</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>sql</td><td>✓</td><td>✓</td><td></td><td></td></tr>
 <tr><td>sshclientconfig</td><td>✓</td><td></td><td></td><td></td></tr>
-<tr><td>starlark</td><td>✓</td><td>✓</td><td></td><td><code>starpls</code></td></tr>
+<tr><td>starlark</td><td>✓</td><td>✓</td><td>✓</td><td><code>starpls</code></td></tr>
 <tr><td>strace</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>supercollider</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>svelte</td><td>✓</td><td></td><td>✓</td><td><code>svelteserver</code></td></tr>
@@ -1804,6 +1804,7 @@ Languages</a> guide for more language configuration information.</p>
 <tr><td>textproto</td><td>✓</td><td>✓</td><td>✓</td><td></td></tr>
 <tr><td>tfvars</td><td>✓</td><td></td><td>✓</td><td><code>terraform-ls</code></td></tr>
 <tr><td>thrift</td><td>✓</td><td></td><td></td><td></td></tr>
+<tr><td>tlaplus</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>todotxt</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>toml</td><td>✓</td><td>✓</td><td></td><td><code>taplo</code></td></tr>
 <tr><td>tsq</td><td>✓</td><td></td><td></td><td><code>ts_query_ls</code></td></tr>
@@ -1825,6 +1826,7 @@ Languages</a> guide for more language configuration information.</p>
 <tr><td>wast</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>wat</td><td>✓</td><td></td><td></td><td><code>wat_server</code></td></tr>
 <tr><td>webc</td><td>✓</td><td></td><td></td><td></td></tr>
+<tr><td>werk</td><td>✓</td><td></td><td></td><td></td></tr>
 <tr><td>wgsl</td><td>✓</td><td></td><td></td><td><code>wgsl-analyzer</code></td></tr>
 <tr><td>wit</td><td>✓</td><td></td><td>✓</td><td></td></tr>
 <tr><td>wren</td><td>✓</td><td>✓</td><td>✓</td><td></td></tr>
@@ -1940,6 +1942,7 @@ Its settings will be merged with the configuration directory <code>config.toml</
 <tr><td><code>jump-label-alphabet</code></td><td>The characters that are used to generate two character jump labels. Characters at the start of the alphabet are used first.</td><td><code>"abcdefghijklmnopqrstuvwxyz"</code></td></tr>
 <tr><td><code>end-of-line-diagnostics</code></td><td>Minimum severity of diagnostics to render at the end of the line. Set to <code>disable</code> to disable entirely. Refer to the setting about <code>inline-diagnostics</code> for more details</td><td>"disable"</td></tr>
 <tr><td><code>clipboard-provider</code></td><td>Which API to use for clipboard interaction. One of <code>pasteboard</code> (MacOS), <code>wayland</code>, <code>x-clip</code>, <code>x-sel</code>, <code>win-32-yank</code>, <code>termux</code>, <code>tmux</code>, <code>windows</code>, <code>termcode</code>, <code>none</code>, or a custom command set.</td><td>Platform and environment specific.</td></tr>
+<tr><td><code>editor-config</code></td><td>Whether to read settings from <a href="https://editorconfig.org">EditorConfig</a> files</td><td><code>true</code></td></tr>
 </tbody></table>
 </div>
 <h3 id="editorclipboard-provider-section"><a class="header" href="#editorclipboard-provider-section"><code>[editor.clipboard-provider]</code> Section</a></h3>
