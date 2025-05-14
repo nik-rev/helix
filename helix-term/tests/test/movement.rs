@@ -388,7 +388,7 @@ async fn match_around_closest_ts() -> anyhow::Result<()> {
 
     test_with_config(
         AppBuilder::new().with_file("foo.rs", None),
-        (
+        (x
             r##"fn main() { let _ = ("#[|1]#23", "#(|1)#23"); } "##,
             "3mam",
             r##"fn main() #[|{ let _ = ("123", "123"); }]# "##,
