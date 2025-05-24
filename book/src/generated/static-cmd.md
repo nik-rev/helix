@@ -303,3 +303,6 @@
 | `extend_to_word` | Extend to a two-character label | select: `` gw `` |
 | `goto_next_tabstop` | goto next snippet placeholder |  |
 | `goto_prev_tabstop` | goto next snippet placeholder |  |
+| `paste_before_joined_with_newline` | Join all selections with a newline and paste before cursor | normal: `` <C-P> ``, select: `` <C-P> `` |
+| `paste_after_joined_with_newline` | Join all selections with a newline and paste after cursor | normal: `` <C-p> ``, select: `` <C-p> `` |
+| `replace_joined_with_newline` | Replace selection with all selections joined with a newline | normal: `` <C-R> ``, select: `` <C-R> `` |
