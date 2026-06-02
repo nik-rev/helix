@@ -1743,7 +1743,7 @@ fn find_char(cx: &mut Context, direction: Direction, inclusive: bool, extend: bo
                         (true, Direction::Forward) => cursor_head,
                         (true, Direction::Backward) => cursor_anchor,
                         (false, Direction::Forward) => cursor_head + 1,
-                        (false, Direction::Backward) => cursor_anchor - 1,
+                        (false, Direction::Backward) => cursor_anchor.saturating_sub(1),
                     };
 
                     search::find_nth_char(count, text, ch, search_start_pos, direction)
@@ -2565,18 +2565,18 @@ fn make_search_word_bounded(cx: &mut Context) {
 
 fn global_search(cx: &mut Context) {
     #[derive(Debug)]
-    struct FileResult {
-        path: PathBuf,
+    struct FileResult<'a> {
+        path: Cow<'a, Path>,
         /// 0 indexed line start
         line_start: usize,
         /// 0 indexed line end
         line_end: usize,
     }
 
-    impl FileResult {
+    impl FileResult<'_> {
         fn new(path: &Path, line_start: usize, line_end: usize) -> Self {
             Self {
-                path: path.to_path_buf(),
+                path: helix_stdx::path::get_relative_path(path.to_path_buf()),
                 line_start,
                 line_end,
             }
@@ -2586,42 +2586,21 @@ fn global_search(cx: &mut Context) {
     struct GlobalSearchConfig {
         smart_case: bool,
         file_picker_config: helix_view::editor::FilePickerConfig,
-        directory_style: Style,
-        number_style: Style,
-        colon_style: Style,
+        style: PathStyleConfig,
     }
 
     let config = cx.editor.config();
     let config = GlobalSearchConfig {
         smart_case: config.search.smart_case,
         file_picker_config: config.file_picker.clone(),
-        directory_style: cx.editor.theme.get("ui.text.directory"),
-        number_style: cx.editor.theme.get("constant.numeric.integer"),
-        colon_style: cx.editor.theme.get("punctuation"),
+        style: PathStyleConfig::new(&cx.editor.theme),
     };
 
     let columns = [
         PickerColumn::new("path", |item: &FileResult, config: &GlobalSearchConfig| {
-            let path = helix_stdx::path::get_relative_path(&item.path);
-
-            let directories = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| format!("{}{}", p.display(), std::path::MAIN_SEPARATOR))
-                .unwrap_or_default();
-
-            let filename = item
-                .path
-                .file_name()
-                .expect("global search paths are normalized (can't end in `..`)")
-                .to_string_lossy();
-
-            Cell::from(Spans::from(vec![
-                Span::styled(directories, config.directory_style),
-                Span::raw(filename),
-                Span::styled(":", config.colon_style),
-                Span::styled((item.line_start + 1).to_string(), config.number_style),
-            ]))
+            config
+                .style
+                .stylize(Some(&item.path), Some(item.line_start))
         }),
         PickerColumn::hidden("contents"),
     ];
@@ -2642,7 +2621,7 @@ fn global_search(cx: &mut Context) {
 
         let documents: Vec<_> = editor
             .documents()
-            .map(|doc| (doc.path().cloned(), doc.text().to_owned()))
+            .map(|doc| (doc.path().map(ToOwned::to_owned), doc.text().to_owned()))
             .collect();
 
         let matcher = match RegexMatcherBuilder::new()
@@ -2804,7 +2783,7 @@ fn global_search(cx: &mut Context) {
              line_start,
              line_end,
              ..
-         }| { Some((path.as_path().into(), Some((*line_start, *line_end)))) },
+         }| { Some((path.as_ref().into(), Some((*line_start, *line_end)))) },
     )
     .with_history_register(Some(reg))
     .with_dynamic_query(get_files, Some(275));
@@ -3289,12 +3268,54 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
     }
 }
 
+struct PathStyleConfig {
+    directory_style: Style,
+    number_style: Style,
+    colon_style: Style,
+}
+
+impl PathStyleConfig {
+    fn new(theme: &helix_view::Theme) -> Self {
+        Self {
+            directory_style: theme.get("ui.text.directory"),
+            number_style: theme.get("constant.numeric.integer"),
+            colon_style: theme.get("punctuation"),
+        }
+    }
+
+    fn stylize<'a>(&self, path: Option<&'a Path>, line: Option<usize>) -> Cell<'a> {
+        let mut spans = Vec::new();
+        if let Some(path) = path {
+            let directories = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| format!("{}{}", p.display(), std::path::MAIN_SEPARATOR))
+                .unwrap_or_default();
+            spans.push(Span::styled(directories, self.directory_style));
+        }
+        let filename = path.as_ref().map_or(SCRATCH_BUFFER_NAME.into(), |path| {
+            path.file_name()
+                .expect("all document names are normalized (can't end in `..`)")
+                .to_string_lossy()
+        });
+        spans.push(Span::raw(filename));
+        if let Some(line) = line {
+            spans.extend([
+                Span::styled(":", self.colon_style),
+                Span::styled((line + 1).to_string(), self.number_style),
+            ]);
+        }
+
+        Cell::from(Spans::from(spans))
+    }
+}
+
 fn buffer_picker(cx: &mut Context) {
     let current = view!(cx.editor).doc;
 
-    struct BufferMeta {
+    struct BufferMeta<'a> {
         id: DocumentId,
-        path: Option<PathBuf>,
+        path: Option<Cow<'a, Path>>,
         is_modified: bool,
         is_current: bool,
         focused_at: std::time::Instant,
@@ -3302,7 +3323,10 @@ fn buffer_picker(cx: &mut Context) {
 
     let new_meta = |doc: &Document| BufferMeta {
         id: doc.id(),
-        path: doc.path().cloned(),
+        path: doc
+            .path()
+            .map(ToOwned::to_owned)
+            .map(helix_stdx::path::get_relative_path),
         is_modified: doc.is_modified(),
         is_current: doc.id() == current,
         focused_at: doc.focused_at,
@@ -3330,16 +3354,8 @@ fn buffer_picker(cx: &mut Context) {
             }
             flags.into()
         }),
-        PickerColumn::new("path", |meta: &BufferMeta, _| {
-            let path = meta
-                .path
-                .as_deref()
-                .map(helix_stdx::path::get_relative_path);
-            path.as_deref()
-                .and_then(Path::to_str)
-                .unwrap_or(SCRATCH_BUFFER_NAME)
-                .to_string()
-                .into()
+        PickerColumn::new("path", |meta: &BufferMeta, config: &PathStyleConfig| {
+            config.stylize(meta.path.as_deref(), None)
         }),
     ];
 
@@ -3356,9 +3372,15 @@ fn buffer_picker(cx: &mut Context) {
         0
     };
 
-    let picker = Picker::new(columns, 2, items, (), |cx, meta, action| {
-        cx.editor.switch(meta.id, action);
-    })
+    let picker = Picker::new(
+        columns,
+        2,
+        items,
+        PathStyleConfig::new(&cx.editor.theme),
+        |cx, meta, action| {
+            cx.editor.switch(meta.id, action);
+        },
+    )
     .with_initial_cursor(initial_cursor)
     .with_preview(|editor, meta| {
         let doc = &editor.documents.get(&meta.id)?;
@@ -3372,10 +3394,11 @@ fn buffer_picker(cx: &mut Context) {
 }
 
 fn jumplist_picker(cx: &mut Context) {
-    struct JumpMeta {
+    struct JumpMeta<'a> {
         id: DocumentId,
-        path: Option<PathBuf>,
+        path: Option<Cow<'a, Path>>,
         selection: Selection,
+        line_start: usize,
         text: String,
         is_current: bool,
     }
@@ -3388,36 +3411,32 @@ fn jumplist_picker(cx: &mut Context) {
     }
 
     let new_meta = |view: &View, doc_id: DocumentId, selection: Selection| {
-        let doc = &cx.editor.documents.get(&doc_id);
-        let text = doc.map_or("".into(), |d| {
-            selection
-                .fragments(d.text().slice(..))
-                .map(Cow::into_owned)
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
+        let doc = doc!(cx.editor, &doc_id);
+        let text = doc.text().slice(..);
+        let contents = selection
+            .fragments(text)
+            .map(Cow::into_owned)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line_start = selection.primary().cursor_line(text);
 
         JumpMeta {
             id: doc_id,
-            path: doc.and_then(|d| d.path().cloned()),
+            path: doc
+                .path()
+                .map(ToOwned::to_owned)
+                .map(helix_stdx::path::get_relative_path),
             selection,
-            text,
+            line_start,
+            text: contents,
             is_current: view.doc == doc_id,
         }
     };
 
     let columns = [
         ui::PickerColumn::new("id", |item: &JumpMeta, _| item.id.to_string().into()),
-        ui::PickerColumn::new("path", |item: &JumpMeta, _| {
-            let path = item
-                .path
-                .as_deref()
-                .map(helix_stdx::path::get_relative_path);
-            path.as_deref()
-                .and_then(Path::to_str)
-                .unwrap_or(SCRATCH_BUFFER_NAME)
-                .to_string()
-                .into()
+        ui::PickerColumn::new("path", |item: &JumpMeta, config: &PathStyleConfig| {
+            config.stylize(item.path.as_deref(), Some(item.line_start))
         }),
         ui::PickerColumn::new("flags", |item: &JumpMeta, _| {
             let mut flags = Vec::new();
@@ -3443,7 +3462,7 @@ fn jumplist_picker(cx: &mut Context) {
                 .rev()
                 .map(|(doc_id, selection)| new_meta(view, *doc_id, selection.clone()))
         }),
-        (),
+        PathStyleConfig::new(&cx.editor.theme),
         |cx, meta, action| {
             cx.editor.switch(meta.id, action);
             let config = cx.editor.config();
@@ -3719,6 +3738,7 @@ fn insert_at_line_end(cx: &mut Context) {
 // Enter insert mode and auto-indent the current line if it is empty.
 // If the line is not empty, move the cursor to the specified fallback position.
 fn insert_with_indent(cx: &mut Context, cursor_fallback: IndentFallbackPos) {
+    let was_select_mode = cx.editor.mode == Mode::Select;
     enter_insert_mode(cx);
 
     let (view, doc) = current!(cx.editor);
@@ -3772,7 +3792,7 @@ fn insert_with_indent(cx: &mut Context, cursor_fallback: IndentFallbackPos) {
                 IndentFallbackPos::LineEnd => line_end_char_index(&text, cursor_line),
             };
 
-            ranges.push(range.put_cursor(text, pos + offs, cx.editor.mode == Mode::Select));
+            ranges.push(range.put_cursor(text, pos + offs, was_select_mode));
 
             (cursor_line_start, cursor_line_start, None)
         }
@@ -3986,7 +4006,7 @@ fn normal_mode(cx: &mut Context) {
 fn push_jump(view: &mut View, doc: &mut Document) {
     doc.append_changes_to_history(view);
     let jump = (doc.id(), doc.selection(view.id).clone());
-    view.jumps.push(jump);
+    view.push_jump(doc, jump);
 }
 
 fn goto_line(cx: &mut Context) {
@@ -6007,6 +6027,9 @@ fn select_register(cx: &mut Context) {
 }
 
 fn insert_register(cx: &mut Context) {
+    // TODO: count is reset to 1 before next key so we move it into the closure here.
+    // Would be nice to carry over.
+    let count = cx.count();
     cx.editor.autoinfo = Some(Info::from_registers(
         "Insert register",
         &cx.editor.registers,
@@ -6020,7 +6043,7 @@ fn insert_register(cx: &mut Context) {
                 cx.register
                     .unwrap_or(cx.editor.config().default_yank_register),
                 Paste::Cursor,
-                cx.count(),
+                count,
             );
         }
     })
@@ -7046,7 +7069,8 @@ fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
                 } else {
                     range.with_direction(Direction::Forward)
                 };
-                let (view, doc) = current!(cx.editor);
+                let doc = doc_mut!(cx.editor, &doc);
+                let view = view_mut!(cx.editor, view_id);
                 push_jump(view, doc);
                 doc.set_selection(view_id, range.into());
             }
