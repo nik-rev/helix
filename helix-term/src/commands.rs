@@ -3699,6 +3699,13 @@ pub(crate) fn blame_line_impl(editor: &mut Editor, doc_id: DocumentId, cursor_li
                 || matches!(result, Err(LineBlameError::NotReadyYet) if !inline_blame_config.auto_fetch) =>
         {
             if let Some(path) = doc.path() {
+                let trust_full = editor
+                    .workspace_trust
+                    .query(
+                        doc.workspace_root(),
+                        helix_loader::workspace_trust::TrustQuery::Git,
+                    )
+                    .is_trusted();
                 let tx = editor.handlers.blame.clone();
                 helix_event::send_blocking(
                     &tx,
@@ -3706,6 +3713,7 @@ pub(crate) fn blame_line_impl(editor: &mut Editor, doc_id: DocumentId, cursor_li
                         path: path.to_path_buf(),
                         doc_id: doc.id(),
                         line: Some(cursor_line),
+                        trust_full,
                     },
                 );
                 editor.set_status(format!("Requested blame for {}...", path.display()));

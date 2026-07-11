@@ -1615,6 +1615,7 @@ fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
                     path: path.to_path_buf(),
                     doc_id,
                     line: None,
+                    trust_full,
                 },
             );
         }
@@ -1701,6 +1702,7 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
                         path: path.to_path_buf(),
                         doc_id,
                         line: None,
+                        trust_full,
                     },
                 );
             }

@@ -26,6 +26,8 @@ pub struct BlameEvent {
     /// If this field is set, when we obtain the blame for the file we will
     /// show blame for this line in the status line
     pub line: Option<u32>,
+    /// Whether the document's workspace is trusted for git operations (gix `Trust::Full`)
+    pub trust_full: bool,
 }
 
 pub struct Handlers {
