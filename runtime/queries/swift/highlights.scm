@@ -131,6 +131,10 @@
 
 (enum_entry "case" @keyword)
 
+; Member access
+(navigation_suffix
+  (simple_identifier) @variable.other.member)
+
 ; Function calls
 (call_expression (simple_identifier) @function) ; foo()
 (call_expression ; foo.bar.baz(): highlight the baz()
@@ -140,9 +144,6 @@
    (simple_identifier) @type) ; SomeType.method(): highlight SomeType as a type
    (#match? @type "^[A-Z]"))
 (call_expression (simple_identifier) @keyword (#eq? @keyword "defer")) ; defer { ... }
-
-(navigation_suffix
-  (simple_identifier) @variable.other.member)
 
 (try_operator) @operator
 (try_operator ["try" @keyword])
@@ -174,14 +175,14 @@
 (guard_statement "guard" @keyword.control.conditional)
 (if_statement "if" @keyword.control.conditional)
 (switch_statement "switch" @keyword.control.conditional)
-(switch_entry "case" @keyword)
-(switch_entry "fallthrough" @keyword)
-(switch_entry (default_keyword) @keyword)
-"return" @keyword.return
+(switch_entry "case" @keyword.control.conditional)
+(switch_entry "fallthrough" @keyword.control.conditional)
+(switch_entry (default_keyword) @keyword.control.conditional)
+"return" @keyword.control.return
 (ternary_expression
   ["?" ":"] @keyword.control.conditional)
 
-["do" (throw_keyword) (catch_keyword)] @keyword
+["do" (throw_keyword) (catch_keyword)] @keyword.control.exception
 
 (statement_label) @label
 

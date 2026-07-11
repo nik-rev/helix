@@ -6,7 +6,7 @@
   name: (identifier) @function.method)
 (method_invocation
   name: (identifier) @function.method)
-(super) @function.builtin
+(super) @variable.builtin
 
 ; Annotations
 
@@ -56,6 +56,12 @@
 ; `when` is contextual — only a guard inside a switch label, never a keyword
 ; elsewhere — so scope it to the guard rather than the flat keyword list.
 (guard "when" @keyword.control.conditional)
+
+; Member access. `field_access` is a distinct node from `method_invocation`, so
+; this leaves method calls alone; placed before the SCREAMING @constant rule
+; below so `Type.CONST` stays a constant.
+(field_access
+  field: (identifier) @variable.other.member)
 
 ; Variables
 
