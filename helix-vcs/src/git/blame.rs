@@ -88,9 +88,9 @@ impl FileBlame {
     }
 
     /// Compute blame for this file (expensive)
-    pub fn try_new(file: PathBuf) -> Result<Self> {
-        let thread_safe_repo =
-            open_repo(get_repo_dir(&file)?).context("Failed to open git repo")?;
+    pub fn try_new(file: PathBuf, trust_full: bool) -> Result<Self> {
+        let thread_safe_repo = open_repo(get_repo_dir(&file)?, trust_full)
+            .context("Failed to open git repo")?;
         let repo = thread_safe_repo.to_thread_local();
         let head = repo.head()?.peel_to_commit()?.id;
 
@@ -408,7 +408,7 @@ mod test {
                         // because we won't show it to the user.
                         $(
                             let blame_result =
-                                FileBlame::try_new(file.clone())
+                                FileBlame::try_new(file.clone(), true)
                                     .unwrap()
                                     .blame_for_line(line_number, added_lines, removed_lines)
                                     .commit_title;

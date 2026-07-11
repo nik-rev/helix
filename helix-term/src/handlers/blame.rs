@@ -1,6 +1,7 @@
 use std::{mem, time::Duration};
 
 use helix_event::register_hook;
+use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileBlame;
 use helix_view::{
     events::{DocumentDidOpen, EditorConfigDidChange},
@@ -34,7 +35,7 @@ impl helix_event::AsyncHook for BlameHandler {
     ) -> Option<tokio::time::Instant> {
         self.doc_id = event.doc_id;
         self.show_blame_for_line_in_statusline = event.line;
-        self.file_blame = Some(FileBlame::try_new(event.path));
+        self.file_blame = Some(FileBlame::try_new(event.path, event.trust_full));
         Some(Instant::now() + Duration::from_millis(50))
     }
 
@@ -67,12 +68,24 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     let tx = handlers.blame.clone();
     register_hook!(move |event: &mut DocumentDidOpen<'_>| {
         if event.editor.config().inline_blame.auto_fetch {
+            let trust_full = event
+                .editor
+                .document(event.doc)
+                .map(|doc| {
+                    event
+                        .editor
+                        .workspace_trust
+                        .query(doc.workspace_root(), TrustQuery::Git)
+                        .is_trusted()
+                })
+                .unwrap_or(false);
             helix_event::send_blocking(
                 &tx,
                 BlameEvent {
                     path: event.path.to_path_buf(),
                     doc_id: event.doc,
                     line: None,
+                    trust_full,
                 },
             );
         }
@@ -86,17 +99,29 @@ pub(super) fn register_hooks(handlers: &Handlers) {
         if has_enabled_inline_blame {
             // request blame for all documents, since any of them could have
             // outdated blame
-            for doc in event.editor.documents() {
-                if let Some(path) = doc.path() {
-                    helix_event::send_blocking(
-                        &tx,
-                        BlameEvent {
-                            path: path.to_path_buf(),
-                            doc_id: doc.id(),
-                            line: None,
-                        },
-                    );
-                }
+            let workspace_trust = &event.editor.workspace_trust;
+            let doc_paths: Vec<_> = event
+                .editor
+                .documents()
+                .filter_map(|doc| {
+                    doc.path().map(|path| {
+                        let trust_full = workspace_trust
+                            .query(doc.workspace_root(), TrustQuery::Git)
+                            .is_trusted();
+                        (path.to_path_buf(), doc.id(), trust_full)
+                    })
+                })
+                .collect();
+            for (path, doc_id, trust_full) in doc_paths {
+                helix_event::send_blocking(
+                    &tx,
+                    BlameEvent {
+                        path,
+                        doc_id,
+                        line: None,
+                        trust_full,
+                    },
+                );
             }
         }
         Ok(())
